@@ -1,71 +1,98 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <unistd.h>
-#include <time.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <sys/wait.h>
+#include <sys/msg.h>
 
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-int nombre_places_restantes;
-
-void* caisse(void* arg) {
-    while (1) {
-        pthread_mutex_lock(&mutex);
-
-        if (nombre_places_restantes <= 0) {
-            pthread_mutex_unlock(&mutex);
-            pthread_exit(NULL);
-        }
-
-        int tickets_vendus = (rand() % 7) + 1;
-
-        if (nombre_places_restantes - tickets_vendus >= 0) {
-            nombre_places_restantes -= tickets_vendus;
-            printf("Caisse %d: %d billets vendus, %d places restantes\n", *((int*) arg), tickets_vendus, nombre_places_restantes);
-        }
-
-        pthread_mutex_unlock(&mutex);
-        sleep(rand() % 3 + 1);
-    }
-}
-
-void* afficheur(void* arg) {
-    while (1) {
-        sleep(5);
-        pthread_mutex_lock(&mutex);
-        printf("Afficheur: %d places restantes\n", nombre_places_restantes);
-        pthread_mutex_unlock(&mutex);
-    }
-}
+#define SEM_KEY 1234
+#define SHM_KEY 5678
+#define MSG_KEY 9012
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        printf("Usage: %s <nombre de caisses> <titre du film> <nombre de places>\n", argv[0]);
+    if (argc != 3) {
+        printf("Usage: %s <nombre de caisses> <nombre de places>\n", argv[0]);
         return 1;
     }
 
     int nombre_caisses = atoi(argv[1]);
-    char* titre_film = argv[2];
-    nombre_places_restantes = atoi(argv[3]);
+    int nombre_places = atoi(argv[2]);
 
-    printf("Film: %s, %d places disponibles\n", titre_film, nombre_places_restantes);
 
-    pthread_t threads[nombre_caisses + 1];
-    int caisse_ids[nombre_caisses];
-
-    srand(time(NULL));
-
-    for (int i = 0; i < nombre_caisses; ++i) {
-        caisse_ids[i] = i + 1;
-        pthread_create(&threads[i], NULL, caisse, &caisse_ids[i]);
+    int shmid = shmget(SHM_KEY, sizeof(int), 0644 | IPC_CREAT);
+    if (shmid == -1) {
+        perror("shmget");
+        exit(1);
     }
 
-    pthread_create(&threads[nombre_caisses], NULL, afficheur, NULL);
 
-    for (int i = 0; i < nombre_caisses; ++i) {
-        pthread_join(threads[i], NULL);
+    int *nombre_places_restantes = shmat(shmid, NULL, 0);
+    if (nombre_places_restantes == (int *)(-1)) {
+        perror("shmat");
+        exit(1);
     }
 
-    printf("Toutes les caisses sont fermées. Afficheur actif\n");
+    *nombre_places_restantes = nombre_places;
+
+
+    int semid = semget(SEM_KEY, 1, 0644 | IPC_CREAT);
+    if (semid == -1) {
+        perror("semget");
+        exit(1);
+    }
+
+
+    union semun {
+        int val;
+        struct semid_ds *buf;
+        ushort *array;
+    } argument;
+    argument.val = 1;
+
+    if (semctl(semid, 0, SETVAL, argument) == -1) {
+        perror("semctl");
+        exit(1);
+    }
+
+
+    int msgid = msgget(MSG_KEY, 0644 | IPC_CREAT);
+    if (msgid == -1) {
+        perror("msgget");
+        exit(1);
+    }
+
+
+    for (int i = 0; i < nombre_caisses; ++i) {
+        if (fork() == 0) {
+            execl("./caisse", "caisse", NULL);
+            exit(0);
+        }
+    }
+
+
+    if (fork() == 0) {
+        execl("./afficheur", "afficheur", NULL);
+        exit(0);
+    }
+
+    for (int i = 0; i < nombre_caisses + 1; ++i) {
+        wait(NULL);
+    }
+
+    printf("Toutes les caisses sont fermées. Afficheur arrêté\n");
+
+    if (shmdt(nombre_places_restantes) == -1) {
+        perror("shmdt");
+        exit(1);
+    }
+
+
+    if (shmctl(shmid, IPC_RMID, NULL) == -1 || semctl(semid, 0, IPC_RMID, argument) == -1 || msgctl(msgid, IPC_RMID, NULL) == -1) {
+        perror("destroy");
+        exit(1);
+    }
 
     return 0;
 }
